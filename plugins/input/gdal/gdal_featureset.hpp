@@ -29,6 +29,8 @@
 #include <mapnik/util/variant.hpp>
 // boost
 #include <boost/optional.hpp>
+#include <gdal.h>
+#include <vector>
 
 class GDALDataset;
 class GDALRasterBand;
@@ -67,6 +69,7 @@ public:
                     double dy,
                     boost::optional<double> const& nodata,
                     double nodata_tolerance,
+					std::map<std::string,std::map<std::string, double>> bandInfo,
                     int64_t max_image_area);
     virtual ~gdal_featureset();
     mapnik::feature_ptr next();
@@ -94,6 +97,8 @@ private:
     double nodata_tolerance_;
     int64_t max_image_area_;
     bool first_;
+	std::map<std::string,std::map<std::string, double>> bandInfo_;
+    void histogramAccumlateMinMax16S(unsigned short *pBuf,int width,int height,double *minVal,double *maxVal,float fNoData);
 };
 
 #endif // GDAL_FEATURESET_HPP

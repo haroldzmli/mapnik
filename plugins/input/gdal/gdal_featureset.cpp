@@ -90,6 +90,7 @@ gdal_featureset::gdal_featureset(GDALDataset& dataset,
                                  double dy,
                                  boost::optional<double> const& nodata,
                                  double nodata_tolerance,
+								 ,std::map<std::string,std::map<std::string, double>> bandInfo,
                                  int64_t max_image_area)
     : dataset_(dataset),
       ctx_(std::make_shared<mapnik::context_type>()),
@@ -104,7 +105,8 @@ gdal_featureset::gdal_featureset(GDALDataset& dataset,
       nodata_value_(nodata),
       nodata_tolerance_(nodata_tolerance),
       max_image_area_(max_image_area),
-      first_(true)
+      first_(true),
+	  bandInfo_(bandInfo)
 {
     ctx_->push("nodata");
 }
@@ -423,85 +425,485 @@ feature_ptr gdal_featureset::get_feature(mapnik::query const& q)
         {
             mapnik::image_rgba8 image(im_width, im_height);
             image.set(std::numeric_limits<std::uint32_t>::max());
-            for (int i = 0; i < nbands_; ++i)
-            {
-                GDALRasterBand * band = dataset_.GetRasterBand(i + 1);
-#ifdef MAPNIK_LOG
-                get_overview_meta(band);
-#endif
-                GDALColorInterp color_interp = band->GetColorInterpretation();
-                switch (color_interp)
-                {
-                case GCI_RedBand:
-                    red = band;
-                    MAPNIK_LOG_DEBUG(gdal) << "gdal_featureset: Found red band";
-                    break;
-                case GCI_GreenBand:
-                    green = band;
-                    MAPNIK_LOG_DEBUG(gdal) << "gdal_featureset: Found green band";
-                    break;
-                case GCI_BlueBand:
-                    blue = band;
-                    MAPNIK_LOG_DEBUG(gdal) << "gdal_featureset: Found blue band";
-                    break;
-                case GCI_AlphaBand:
-                    alpha = band;
-                    MAPNIK_LOG_DEBUG(gdal) << "gdal_featureset: Found alpha band";
-                    break;
-                case GCI_GrayIndex:
-                    grey = band;
-                    MAPNIK_LOG_DEBUG(gdal) << "gdal_featureset: Found gray band";
-                    break;
-                case GCI_PaletteIndex:
-                {
-                    grey = band;
-#ifdef MAPNIK_LOG
-                    MAPNIK_LOG_DEBUG(gdal) << "gdal_featureset: Found gray band, and colortable...";
-                    GDALColorTable *color_table = band->GetColorTable();
+			GDALDataType band_type = dataset_.GetRasterBand(1)->GetRasterDataType();
+            if(bandInfo_.size() > 0)
+			{
+				if(bandInfo_.size() >= 3)
+				{
+					red = dataset_.GetRasterBand(bandInfo_["red"]["band"]);
+					green = dataset_.GetRasterBand(bandInfo_["green"]["band"]);
+					blue = dataset_.GetRasterBand(bandInfo_["blue"]["band"]);
+				}
+				if(bandInfo_.size() == 4)
+				{
+					alpha = dataset_.GetRasterBand(bandInfo_["alpha"]["band"]);
+				}
+				if (bandInfo_.size() == 1)
+				{
+					red = dataset_.GetRasterBand(bandInfo_["red"]["band"]);
+				}
+			}
+			else
+			{
+				for (int i = 0; i < nbands_; ++i)
+				{
+					GDALRasterBand * band = dataset_.GetRasterBand(i + 1);
+	#ifdef MAPNIK_LOG
+					get_overview_meta(band);
+	#endif
+					GDALColorInterp color_interp = band->GetColorInterpretation();
+					switch (color_interp)
+					{
+					case GCI_RedBand:
+						red = band;
+						MAPNIK_LOG_DEBUG(gdal) << "gdal_featureset: Found red band";
+						break;
+					case GCI_GreenBand:
+						green = band;
+						MAPNIK_LOG_DEBUG(gdal) << "gdal_featureset: Found green band";
+						break;
+					case GCI_BlueBand:
+						blue = band;
+						MAPNIK_LOG_DEBUG(gdal) << "gdal_featureset: Found blue band";
+						break;
+					case GCI_AlphaBand:
+						alpha = band;
+						MAPNIK_LOG_DEBUG(gdal) << "gdal_featureset: Found alpha band";
+						break;
+					case GCI_GrayIndex:
+						grey = band;
+						MAPNIK_LOG_DEBUG(gdal) << "gdal_featureset: Found gray band";
+						break;
+					case GCI_PaletteIndex:
+					{
+						grey = band;
+	#ifdef MAPNIK_LOG
+						MAPNIK_LOG_DEBUG(gdal) << "gdal_featureset: Found gray band, and colortable...";
+						GDALColorTable *color_table = band->GetColorTable();
 
-                    if (color_table)
-                    {
-                        int count = color_table->GetColorEntryCount();
-                        MAPNIK_LOG_DEBUG(gdal) << "gdal_featureset: Color Table count=" << count;
+						if (color_table)
+						{
+							int count = color_table->GetColorEntryCount();
+							MAPNIK_LOG_DEBUG(gdal) << "gdal_featureset: Color Table count=" << count;
 
-                        for (int j = 0; j < count; j++)
-                        {
-                            const GDALColorEntry *ce = color_table->GetColorEntry (j);
-                            if (! ce) continue;
-                            MAPNIK_LOG_DEBUG(gdal) << "gdal_featureset: Color entry RGB=" << ce->c1 << "," <<ce->c2 << "," << ce->c3;
-                        }
-                    }
-#endif
-                    break;
-                }
-                case GCI_Undefined:
-#if GDAL_VERSION_NUM <= 1730
-                    if (nbands_ == 4)
-                    {
-                        MAPNIK_LOG_DEBUG(gdal) << "gdal_featureset: Found undefined band (assumming alpha band)";
-                        alpha = band;
-                    }
-                    else
-                    {
-                        MAPNIK_LOG_DEBUG(gdal) << "gdal_featureset: Found undefined band (assumming gray band)";
-                        grey = band;
-                    }
-#else
-                    MAPNIK_LOG_DEBUG(gdal) << "gdal_featureset: Found undefined band (assumming gray band)";
-                    grey = band;
-#endif
-                    break;
-                default:
-                    MAPNIK_LOG_WARN(gdal) << "gdal_featureset: Band type unknown!";
-                    break;
-                }
-            }
-            if (red && green && blue)
-            {
-                MAPNIK_LOG_DEBUG(gdal) << "gdal_featureset: Processing rgb bands...";
-                raster_nodata = red->GetNoDataValue(&raster_has_nodata);
-                GDALColorTable *color_table = red->GetColorTable();
-                bool has_nodata = nodata_value_ || raster_has_nodata;
+							for (int j = 0; j < count; j++)
+							{
+								const GDALColorEntry *ce = color_table->GetColorEntry (j);
+								if (! ce) continue;
+								MAPNIK_LOG_DEBUG(gdal) << "gdal_featureset: Color entry RGB=" << ce->c1 << "," <<ce->c2 << "," << ce->c3;
+							}
+						}
+	#endif
+						break;
+					}
+					case GCI_Undefined:
+	#if GDAL_VERSION_NUM <= 1730
+						if (nbands_ == 4)
+						{
+							MAPNIK_LOG_DEBUG(gdal) << "gdal_featureset: Found undefined band (assumming alpha band)";
+							alpha = band;
+						}
+						else
+						{
+							MAPNIK_LOG_DEBUG(gdal) << "gdal_featureset: Found undefined band (assumming gray band)";
+							grey = band;
+						}
+	#else
+						MAPNIK_LOG_DEBUG(gdal) << "gdal_featureset: Found undefined band (assumming gray band)";
+						grey = band;
+	#endif
+						break;
+					default:
+						MAPNIK_LOG_WARN(gdal) << "gdal_featureset: Band type unknown!";
+						break;
+					}
+				}
+			}
+			switch (band_type)
+			{
+			case GDT_UInt16: 
+			{
+				GByte* pabyBytes = (GByte*) image.bytes();
+				int nPixelCount = image.width() * image.height();
+				int iPixel;
+				int bHaveNoData;
+				if (red && blue && green)
+				{
+					unsigned short *redImage = (unsigned short *) CPLCalloc(
+												sizeof(unsigned short), nPixelCount);
+					unsigned short *greenImage = (unsigned short *) CPLCalloc(
+																	sizeof(unsigned short), nPixelCount);
+					unsigned short *blueImage = (unsigned short *) CPLCalloc(
+																	sizeof(unsigned short), nPixelCount);
+
+					float fNoData = (float) red->GetNoDataValue(&bHaveNoData);
+
+					raster_io_error = red->RasterIO(GF_Read, x_off, y_off,
+												width, height, redImage, image.width(),
+												image.height(), GDT_UInt16, 0, 0, NULL);
+					raster_io_error = green->RasterIO(GF_Read, x_off, y_off,
+												width, height, greenImage, image.width(),
+												image.height(), GDT_UInt16, 0, 0, NULL);
+					raster_io_error = blue->RasterIO(GF_Read, x_off, y_off,
+												width, height, blueImage, image.width(),
+												image.height(), GDT_UInt16, 0, 0, NULL);
+
+					unsigned short result;
+					double redMaxVal = bandInfo_["red"]["max"];
+					double redMinVal = bandInfo_["red"]["min"];
+					double greenMaxVal = bandInfo_["green"]["max"];
+					double greenMinVal = bandInfo_["green"]["min"];
+					double blueMaxVal= bandInfo_["blue"]["max"];
+					double blueMinVal = bandInfo_["blue"]["min"];
+
+//					std::cout << "redMaxVal:" << redMaxVal<< " redMinVal:" << redMinVal << " greenMaxVal:" << greenMaxVal << std::endl;
+//					std::cout << "blueMaxVal:" << blueMaxVal<< " blueMinVal:" << blueMinVal <<  std::endl;
+					unsigned short data ;
+
+					for (iPixel = 0; iPixel < nPixelCount; iPixel++) {
+						if (bHaveNoData && ((redImage[iPixel] == fNoData) || (greenImage[iPixel] == fNoData) || (blueImage[iPixel] == fNoData))) {
+							pabyBytes[4 * iPixel + 0] = (GByte) 255;
+							pabyBytes[4 * iPixel + 1] = (GByte) 255;
+							pabyBytes[4 * iPixel + 2] = (GByte) 255;
+							pabyBytes[4 * iPixel + 3] = (GByte) 0;
+							continue;
+						}
+						data = redImage[iPixel];
+						if (data >= redMaxVal) {
+							result = 255;
+						} else if (data <= redMinVal) {
+							result = 0;
+						} else {
+							result = (data - redMinVal) / (redMaxVal - redMinVal) * 255;
+						}
+						//if(0<result<255)
+							pabyBytes[4 * iPixel + 0] = (GByte) (result);
+
+						data = greenImage[iPixel];
+						if (data >= greenMaxVal) {
+							result = 255;
+						} else if (data <= greenMinVal) {
+							result = 0;
+						} else {
+							result = (data - greenMinVal)
+									/ (greenMaxVal - greenMinVal) * 255;
+						}
+						//if(0<result<255)
+						pabyBytes[4 * iPixel + 1] = (GByte) (result);
+
+						data = blueImage[iPixel];
+						if (data >= blueMaxVal) {
+							result = 255;
+						} else if (data <= blueMinVal) {
+							result = 0;
+						} else {
+							result = (data - blueMinVal)
+									/ (blueMaxVal - blueMinVal) * 255;
+						}
+						//if(0<result<255)
+						pabyBytes[4 * iPixel + 2] = (GByte) (result);
+						pabyBytes[4 * iPixel + 3] = (GByte) (255);
+
+					}
+					delete redImage;
+					delete greenImage;
+					delete blueImage;
+				}
+				mapnik::raster_ptr raster = std::make_shared<mapnik::raster>(
+						feature_raster_extent, intersect, image, filter_factor);
+				// set nodata value to be used in raster colorizer
+				if (nodata_value_)
+					raster->set_nodata(*nodata_value_);
+				else
+					raster->set_nodata(raster_nodata);
+				feature->set_raster(raster);
+
+				break;
+			}
+			case GDT_Int16: {
+				//std::cout << "band_type GDT_Int16 ..." << std::endl;
+				GByte* pabyBytes = (GByte*) image.bytes();
+				int nPixelCount = image.width() * image.height();
+				int iPixel;
+				int bHaveNoData;
+				if (red && blue && green) {
+					short *redImage = (short *) CPLCalloc(
+							sizeof(short), nPixelCount);
+					short *greenImage = (short *) CPLCalloc(
+							sizeof(short), nPixelCount);
+					short *blueImage = (short *) CPLCalloc(
+							sizeof(short), nPixelCount);
+
+					float fNoData = (float) red->GetNoDataValue(&bHaveNoData);
+
+					raster_io_error = red->RasterIO(GF_Read, x_off, y_off,
+							width, height, redImage, image.width(),
+							image.height(), GDT_Int16, 0, 0, NULL);
+					raster_io_error = green->RasterIO(GF_Read, x_off, y_off,
+							width, height, greenImage, image.width(),
+							image.height(), GDT_Int16, 0, 0, NULL);
+					raster_io_error = blue->RasterIO(GF_Read, x_off, y_off,
+							width, height, blueImage, image.width(),
+							image.height(), GDT_Int16, 0, 0, NULL);
+
+					unsigned short result;
+					double redMaxVal = bandInfo_["red"]["max"];
+					double redMinVal = bandInfo_["red"]["min"];
+					double greenMaxVal = bandInfo_["green"]["max"];
+					double greenMinVal = bandInfo_["green"]["min"];
+					double blueMaxVal = bandInfo_["blue"]["max"];
+					double blueMinVal = bandInfo_["blue"]["min"];
+
+//					std::cout << "redMaxVal:" << redMaxVal << " redMinVal:"
+//							<< redMinVal << " greenMaxVal:" << greenMaxVal
+//							<< std::endl;
+//					std::cout << "blueMaxVal:" << blueMaxVal << " blueMinVal:"
+//							<< blueMinVal << std::endl;
+					short data;
+
+					for (iPixel = 0; iPixel < nPixelCount; iPixel++) {
+						if (bHaveNoData
+								&& ((redImage[iPixel] == fNoData)
+										|| (greenImage[iPixel] == fNoData)
+										|| (blueImage[iPixel] == fNoData))) {
+							pabyBytes[4 * iPixel + 0] = (GByte) 255;
+							pabyBytes[4 * iPixel + 1] = (GByte) 255;
+							pabyBytes[4 * iPixel + 2] = (GByte) 255;
+							pabyBytes[4 * iPixel + 3] = (GByte) 0;
+							continue;
+						}
+						data = redImage[iPixel];
+						if (data >= redMaxVal) {
+							result = 255;
+						} else if (data <= redMinVal) {
+							result = 0;
+						} else {
+							result = (data - redMinVal)
+									/ (redMaxVal - redMinVal) * 255;
+						}
+						//if(0<result<255)
+						pabyBytes[4 * iPixel + 0] = (GByte) (result);
+
+						data = greenImage[iPixel];
+						if (data >= greenMaxVal) {
+							result = 255;
+						} else if (data <= greenMinVal) {
+							result = 0;
+						} else {
+							result = (data - greenMinVal)
+									/ (greenMaxVal - greenMinVal) * 255;
+						}
+						//if(0<result<255)
+						pabyBytes[4 * iPixel + 1] = (GByte) (result);
+
+						data = blueImage[iPixel];
+						if (data >= blueMaxVal) {
+							result = 255;
+						} else if (data <= blueMinVal) {
+							result = 0;
+						} else {
+							result = (data - blueMinVal)
+									/ (blueMaxVal - blueMinVal) * 255;
+						}
+						//if(0<result<255)
+						pabyBytes[4 * iPixel + 2] = (GByte) (result);
+						pabyBytes[4 * iPixel + 3] = (GByte) (255);
+
+					}
+					delete redImage;
+					delete greenImage;
+					delete blueImage;
+				}
+				mapnik::raster_ptr raster = std::make_shared<mapnik::raster>(
+						feature_raster_extent, intersect, image, filter_factor);
+				// set nodata value to be used in raster colorizer
+				if (nodata_value_)
+					raster->set_nodata(*nodata_value_);
+				else
+					raster->set_nodata(raster_nodata);
+				feature->set_raster(raster);
+
+				break;
+			}
+			case GDT_Float32: {
+				//std::cout << "band_type GDT_Float32 ..." << std::endl;
+				GByte* pabyBytes = (GByte*) image.bytes();
+				int nPixelCount = image.width() * image.height();
+				int iPixel;
+				int bHaveNoData;
+				if (red && blue && green) {
+					float *redImage = (float *) CPLCalloc(sizeof(float),
+							nPixelCount);
+					float *greenImage = (float *) CPLCalloc(sizeof(float),
+							nPixelCount);
+					float *blueImage = (float *) CPLCalloc(sizeof(float),
+							nPixelCount);
+
+					float fNoData = (float) red->GetNoDataValue(&bHaveNoData);
+
+					raster_io_error = red->RasterIO(GF_Read, x_off, y_off,
+							width, height, redImage, image.width(),
+							image.height(), GDT_Float32, 0, 0, NULL);
+					raster_io_error = green->RasterIO(GF_Read, x_off, y_off,
+							width, height, greenImage, image.width(),
+							image.height(), GDT_Float32, 0, 0, NULL);
+					raster_io_error = blue->RasterIO(GF_Read, x_off, y_off,
+							width, height, blueImage, image.width(),
+							image.height(), GDT_Float32, 0, 0, NULL);
+
+					unsigned short result;
+					double redMaxVal = bandInfo_["red"]["max"];
+					double redMinVal = bandInfo_["red"]["min"];
+					double greenMaxVal = bandInfo_["green"]["max"];
+					double greenMinVal = bandInfo_["green"]["min"];
+					double blueMaxVal = bandInfo_["blue"]["max"];
+					double blueMinVal = bandInfo_["blue"]["min"];
+//
+//					std::cout << "redMaxVal:" << redMaxVal << " redMinVal:"
+//							<< redMinVal << " greenMaxVal:" << greenMaxVal
+//							<< std::endl;
+//					std::cout << "blueMaxVal:" << blueMaxVal << " blueMinVal:"
+//							<< blueMinVal << std::endl;
+					float data;
+
+					for (iPixel = 0; iPixel < nPixelCount; iPixel++) {
+						if (bHaveNoData
+								&& ((redImage[iPixel] == fNoData)
+										|| (greenImage[iPixel] == fNoData)
+										|| (blueImage[iPixel] == fNoData))) {
+							pabyBytes[4 * iPixel + 0] = (GByte) 255;
+							pabyBytes[4 * iPixel + 1] = (GByte) 255;
+							pabyBytes[4 * iPixel + 2] = (GByte) 255;
+							pabyBytes[4 * iPixel + 3] = (GByte) 0;
+							continue;
+						}
+						data = redImage[iPixel];
+						if (data >= redMaxVal) {
+							result = 255;
+						} else if (data <= redMinVal) {
+							result = 0;
+						} else {
+							result = (data - redMinVal)
+									/ (redMaxVal - redMinVal) * 255;
+						}
+						//if(0<result<255)
+						pabyBytes[4 * iPixel + 0] = (GByte) (result);
+
+						data = greenImage[iPixel];
+						if (data >= greenMaxVal) {
+							result = 255;
+						} else if (data <= greenMinVal) {
+							result = 0;
+						} else {
+							result = (data - greenMinVal)
+									/ (greenMaxVal - greenMinVal) * 255;
+						}
+						//if(0<result<255)
+						pabyBytes[4 * iPixel + 1] = (GByte) (result);
+
+						data = blueImage[iPixel];
+						if (data >= blueMaxVal) {
+							result = 255;
+						} else if (data <= blueMinVal) {
+							result = 0;
+						} else {
+							result = (data - blueMinVal)
+									/ (blueMaxVal - blueMinVal) * 255;
+						}
+						//if(0<result<255)
+						pabyBytes[4 * iPixel + 2] = (GByte) (result);
+						pabyBytes[4 * iPixel + 3] = (GByte) (255);
+
+					}
+					delete redImage;
+					delete greenImage;
+					delete blueImage;
+				}
+				if (red) {
+					float *redImage = (float *) CPLCalloc(sizeof(float),
+							nPixelCount);
+
+					float fNoData = (float) red->GetNoDataValue(&bHaveNoData);
+					//std::cout << "fNoData:" << fNoData << std::endl;
+
+					raster_io_error = red->RasterIO(GF_Read, x_off, y_off,
+							width, height, redImage, image.width(),
+							image.height(), GDT_Float32, 0, 0, NULL);
+
+					unsigned short result;
+					double redMaxVal = bandInfo_["red"]["max"];
+					double redMinVal = bandInfo_["red"]["min"];
+//					std::cout << "redMaxVal:" << redMaxVal << " redMinVal:"
+//												<< redMinVal
+//												<< std::endl;
+					float data;
+					for (iPixel = 0; iPixel < nPixelCount; iPixel++) {
+						if (bHaveNoData
+								&& ((redImage[iPixel] == fNoData)||(std::isnan(redImage[iPixel])))) {
+							pabyBytes[4 * iPixel + 0] = (GByte) 255;
+							pabyBytes[4 * iPixel + 1] = (GByte) 255;
+							pabyBytes[4 * iPixel + 2] = (GByte) 255;
+							pabyBytes[4 * iPixel + 3] = (GByte) 0;
+							//std::cout << "-----" << std::endl;
+							continue;
+						}
+						if (std::isnan(redImage[iPixel])) {
+							pabyBytes[4 * iPixel + 0] = (GByte) 255;
+							pabyBytes[4 * iPixel + 1] = (GByte) 255;
+							pabyBytes[4 * iPixel + 2] = (GByte) 255;
+							pabyBytes[4 * iPixel + 3] = (GByte) 0;
+							continue;
+						}
+						data = redImage[iPixel];
+						if (data >= redMaxVal) {
+							result = 255;
+							pabyBytes[4 * iPixel + 0] = (GByte) (result);
+							pabyBytes[4 * iPixel + 1] = (GByte) (result);
+							pabyBytes[4 * iPixel + 2] = (GByte) (result);
+							pabyBytes[4 * iPixel + 3] = (GByte) (result);
+
+						} else if (data <= redMinVal) {
+							result = 0;
+							pabyBytes[4 * iPixel + 0] = (GByte) (result);
+							pabyBytes[4 * iPixel + 1] = (GByte) (result);
+							pabyBytes[4 * iPixel + 2] = (GByte) (result);
+							pabyBytes[4 * iPixel + 3] = (GByte) (result);
+
+
+						} else {
+							result = (data - redMinVal)
+									/ (redMaxVal - redMinVal) * 255;
+							pabyBytes[4 * iPixel + 0] = (GByte) (result);
+							pabyBytes[4 * iPixel + 1] = (GByte) (result);
+							pabyBytes[4 * iPixel + 2] = (GByte) (result);
+							pabyBytes[4 * iPixel + 3] = (GByte) (255);
+
+						}
+
+
+
+					}
+					delete redImage;
+				}
+				mapnik::raster_ptr raster = std::make_shared<mapnik::raster>(
+						feature_raster_extent, intersect, image, filter_factor);
+				// set nodata value to be used in raster colorizer
+				if (nodata_value_)
+					raster->set_nodata(*nodata_value_);
+				else
+					raster->set_nodata(raster_nodata);
+				feature->set_raster(raster);
+				break;
+			}
+			default:
+			case GDT_Byte: 
+			{			
+				if (red && green && blue)
+				{
+					MAPNIK_LOG_DEBUG(gdal) << "gdal_featureset: Processing rgb bands...";
+					raster_nodata = red->GetNoDataValue(&raster_has_nodata);
+					GDALColorTable *color_table = red->GetColorTable();
+					bool has_nodata = nodata_value_ || raster_has_nodata;
 
                 // we can deduce the alpha channel from nodata in the Byte case
                 // by reusing the reading of R,G,B bands directly
@@ -721,6 +1123,9 @@ feature_ptr gdal_featureset::get_feature(mapnik::query const& q)
                 raster->set_nodata(raster_nodata);
             }
             feature->set_raster(raster);
+			break;
+			}
+			}
         }
         // report actual/original source nodata in feature attributes
         if (raster_has_nodata && !std::isnan(raster_nodata))

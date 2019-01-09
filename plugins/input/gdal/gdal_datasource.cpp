@@ -32,6 +32,12 @@
 
 #include <gdal_version.h>
 
+// boost
+#include <boost/format.hpp>
+#include <boost/make_shared.hpp>
+#include <boost/tokenizer.hpp>
+#include <boost/spirit/include/qi.hpp>
+#include <boost/spirit/include/support_adapt_adt_attributes.hpp>
 #include <mutex>
 
 using mapnik::datasource;
@@ -192,6 +198,52 @@ gdal_datasource::gdal_datasource(parameters const& params)
 
         extent_.init(x0, y0, x1, y1);
     }
+	GDALDataType band_type = dataset_->GetRasterBand(1)->GetRasterDataType();
+    boost::optional<std::string> rgbaStr = params.get<std::string>("rgba");
+    int count = 0;
+    if (rgbaStr)
+    {
+		boost::char_separator<char> sep(", ");
+		double d;
+		boost::tokenizer<boost::char_separator<char> > tok(*rgbaStr, sep);
+
+		for (boost::tokenizer<boost::char_separator<char> >::iterator beg = tok.begin();
+				beg != tok.end(); ++beg)
+		{
+			std::string item = mapnik::util::trim_copy(*beg);
+			// note: we intentionally do not use mapnik::util::conversions::string2double
+			// here to ensure that shapeindex can statically compile mapnik::box2d without
+			// needing to link to libmapnik
+			boost::spirit::qi::double_type double_;
+			boost::spirit::ascii::space_type space;
+			std::string::const_iterator str_beg = item.begin();
+			std::string::const_iterator str_end = item.end();
+			bool r = boost::spirit::qi::phrase_parse(str_beg,
+					str_end,
+					double_,
+					space,
+					d);
+			if (!(r && (str_beg == str_end)))
+			{
+				break;
+			}
+			int bandIndex = static_cast<int>(d);
+			bandInfo(band_type,dataset_->GetRasterBand(bandIndex),count);
+			count++;
+		}
+   }
+   else
+   {
+	   int nband = 0;
+	   if(nbands_ > 3)
+		   nband = 3;
+	   else
+		   nband = nbands_;
+	   for (int i = 0; i < nbands_; ++i) {
+		   bandInfo(band_type,dataset_->GetRasterBand(i+1),count);
+		   count++;
+		}
+	}
 
     MAPNIK_LOG_DEBUG(gdal) << "gdal_datasource: Raster Size=" << width_ << "," << height_;
     MAPNIK_LOG_DEBUG(gdal) << "gdal_datasource: Raster Extent=" << extent_;
@@ -245,6 +297,7 @@ featureset_ptr gdal_datasource::features(query const& q) const
                                               dy_,
                                               nodata_value_,
                                               nodata_tolerance_,
+											  bandInfo_,
                                               max_image_area_);
 }
 
@@ -265,5 +318,129 @@ featureset_ptr gdal_datasource::features_at_point(coord2d const& pt, double tol)
                                               dy_,
                                               nodata_value_,
                                               nodata_tolerance_,
+											  bandInfo_,
                                               max_image_area_);
 }
+void gdal_datasource::bandInfo(GDALDataType band_type, GDALRasterBand * band,int count)
+{
+	int bHaveNoData;
+	float fNoData = (float) band->GetNoDataValue(&bHaveNoData);
+	std::pair<double,double> maxmin;
+	int bGotMin, bGotMax;
+	double adfMinMax[2];
+	adfMinMax[0] = band->GetMinimum(&bGotMin);
+	adfMinMax[1] = band->GetMaximum(&bGotMax);
+	if (!(bGotMin && bGotMax))
+		GDALComputeRasterMinMax(band, TRUE, adfMinMax);
+	switch (band_type) {
+	case GDT_UInt16: {
+		unsigned short *maxMinBuff = (unsigned short *) CPLCalloc(
+				sizeof(unsigned short), 1024 * 1024);
+		band->RasterIO(GF_Read, 0, 0, width_, height_, maxMinBuff, 1024, 1024,
+				GDT_UInt16, 0, 0, NULL);
+		maxmin = histogramAccumlateMinMax(band_type, maxMinBuff, 1024, 1024, fNoData,adfMinMax);
+		CPLFree(maxMinBuff);
+		break;
+	}
+	case GDT_Int16: {
+			short *maxMinBuff = (short *) CPLCalloc(
+					sizeof(short), 1024 * 1024);
+			band->RasterIO(GF_Read, 0, 0, width_, height_, maxMinBuff, 1024, 1024,
+					GDT_Int16, 0, 0, NULL);
+			maxmin = histogramAccumlateMinMax(band_type, maxMinBuff, 1024, 1024, fNoData,adfMinMax);
+			CPLFree(maxMinBuff);
+			break;
+		}
+	case GDT_Float32: {
+		float *maxMinBuff = (float *) CPLCalloc(
+				sizeof(float), 1024 * 1024);
+		band->RasterIO(GF_Read, 0, 0, width_, height_, maxMinBuff, 1024, 1024,
+				GDT_Float32, 0, 0, NULL);
+		maxmin = histogramAccumlateMinMax(band_type, maxMinBuff, 1024, 1024, fNoData,adfMinMax);
+		CPLFree(maxMinBuff);
+		break;
+	}
+	}
+	std::map<std::string, double> temp;
+	temp.insert(std::pair<std::string, double>("max", maxmin.first));
+	temp.insert(std::pair<std::string, double>("min", maxmin.second));
+	temp.insert(std::pair<std::string, double>("band", band->GetBand()));
+	temp.insert(std::pair<std::string, double>("nodata", fNoData));
+	if (count == 0) {
+		bandInfo_.insert(std::make_pair("red", temp));
+	}
+	if (count == 1) {
+		bandInfo_.insert(std::make_pair("green", temp));
+	}
+	if (count == 2) {
+		bandInfo_.insert(std::make_pair("blue", temp));
+	}
+	if (count == 3) {
+		bandInfo_.insert(std::make_pair("alpha", temp));
+	}
+}
+std::pair<double,double> gdal_datasource::histogramAccumlateMinMax(GDALDataType band_type,void *pBuf,int width,int height,double fNoData,double adfMinMax[])
+{
+	int length = static_cast<int>(adfMinMax[1] - adfMinMax[0]) + 1;
+	if(length < 500)
+		length = 500;
+	int num[length];
+	memset(num, 0, sizeof(num));
+	//todo 1/myBinSize may nan .this is not normal
+	double myBinSize = (adfMinMax[1] - adfMinMax[0]) / length;
+	int nonNullCount = 0;
+	for (int x = 0; x < width; x++) {
+		for (int y = 0; y < height; y++) {
+			double tmpData = 0;
+			switch (band_type) {
+			case GDT_UInt16: {
+				unsigned short v = ((unsigned short *) pBuf)[x * height + y];
+				tmpData = static_cast<double>(v);
+				break;
+			}
+			case GDT_Int16: {
+				short v = ((short *) pBuf)[x * height + y];
+				tmpData = static_cast<double>(v);
+				break;
+			}
+			case GDT_Float32: {
+				float v = ((float *) pBuf)[x * height + y];
+				tmpData = static_cast<double>(v);
+				break;
+			}
+			}
+			if (tmpData == fNoData)
+				continue;
+			int myBinIndex = static_cast<int>(std::floor(tmpData - adfMinMax[0])
+					/ myBinSize);
+			if (myBinIndex < 0)
+				myBinIndex = 0;
+			if (myBinIndex > (length - 1))
+				myBinIndex = length -1;
+			num[myBinIndex] += 1;
+			nonNullCount++;
+		}
+	}
+	int myMincount = static_cast<int>(std::round(0.02 * nonNullCount));
+	int myMaxcount = static_cast<int>(std::round(0.98 * nonNullCount));
+	bool myLowerFound = false;
+	int myCount = 0;
+	double lowerValue = std::numeric_limits<double>::quiet_NaN();
+	double upperValue = std::numeric_limits<double>::quiet_NaN();
+	for (int myBin = 0; myBin < length; myBin++) {
+		int myBinValue = num[myBin];
+		myCount += myBinValue;
+		if (!myLowerFound && myCount > myMincount) {
+			lowerValue = adfMinMax[0] + myBin * myBinSize;
+			myLowerFound = true;
+		}
+		if (myCount >= myMaxcount) {
+			upperValue = adfMinMax[0] + myBin * myBinSize;
+			break;
+		}
+	}
+	//std::cout << "max" << upperValue << "min" << lowerValue << std::endl;
+	return std::pair<double,double>(std::ceil(upperValue),std::floor(lowerValue));
+	//return std::pair<double,double>(upperValue,lowerValue);
+}
+

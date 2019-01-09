@@ -41,6 +41,8 @@
 
 // gdal
 #include <gdal_priv.h>
+class GDALDataset;
+class GDALRasterBand;
 
 class gdal_datasource : public mapnik::datasource
 {
@@ -55,6 +57,8 @@ public:
     boost::optional<mapnik::datasource_geometry_t> get_geometry_type() const;
     mapnik::layer_descriptor get_descriptor() const;
 private:
+	void bandInfo(GDALDataType band_type, GDALRasterBand * band,int count);
+    std::pair<double,double> histogramAccumlateMinMax(GDALDataType band_type,void *pBuf,int width,int height,double fNoData,double adfMinMax[]);
     std::unique_ptr<GDALDataset, decltype(&GDALClose)> dataset_;
     mapnik::box2d<double> extent_;
     std::string dataset_name_;
@@ -66,6 +70,7 @@ private:
     double dy_;
     int nbands_;
     bool shared_dataset_;
+    std::map<std::string,std::map<std::string, double>> bandInfo_;
     boost::optional<double> nodata_value_;
     double nodata_tolerance_;
     int64_t max_image_area_;
