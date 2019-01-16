@@ -90,7 +90,7 @@ gdal_featureset::gdal_featureset(GDALDataset& dataset,
                                  double dy,
                                  boost::optional<double> const& nodata,
                                  double nodata_tolerance,
-								 ,std::map<std::string,std::map<std::string, double>> bandInfo,
+								 std::map<std::string,std::map<std::string, double>> bandInfo,
                                  int64_t max_image_area)
     : dataset_(dataset),
       ctx_(std::make_shared<mapnik::context_type>()),
